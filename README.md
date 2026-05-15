@@ -65,6 +65,15 @@ A **human-carried, time-boxed, encrypted convenience boundary — NOT an HSM.**
 - **Powered-time TTL only.** The board has no RTC, so the lifetime clock counts
   *plugged-in time*, not wall-clock. Carrying it unplugged does not consume
   budget; sitting plugged in does. Expiry → active erase.
+- **Power-cycle TTL evasion is bounded, not eliminated.** Because TTL is
+  powered-time persisted periodically, an attacker who controls power could
+  otherwise yank it before each persist to read "for free". Mitigated by a
+  **boot tax**: every power-up immediately subtracts a fixed 60 s from the
+  budget and writes it to flash *before* `unseal` is accepted, and remaining
+  time is persisted synchronously right after a successful unseal. So a
+  300 s budget allows at most ~5 power cycles total. Without an RTC this
+  caps the attack; it does not remove it — use short TTLs and keep physical
+  custody.
 - **NVS wear-levelling.** Erase overwrites then clears the blob, but flash
   wear-levelling may leave old *ciphertext* pages physically until GC. It's
   ciphertext without the code, but don't treat a "destroyed" device as
@@ -131,7 +140,12 @@ VaultCli list
 VaultCli status [--port COMx] [--json]
 VaultCli ttl  --code 482913 --minutes 0     # destroy now
 VaultCli wipe --code 482913
+VaultCli flip                               # rotate screen 180°
 ```
+
+The screen can also be flipped 180° by **tapping the BOOT button** on the
+board — the orientation is saved and survives reboot *and* self-destruct
+(stored in a separate non-secret config namespace).
 
 Port is auto-detected (no `--port` needed). TTL is **powered-time**:
 `--hour N`/`--minutes N` = budget, `0` = destroy now, `-1` = no expiry.

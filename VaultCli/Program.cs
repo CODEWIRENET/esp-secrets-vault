@@ -159,6 +159,17 @@ static int Run(string[] args)
             return 0;
         }
 
+        // Toggle display orientation 180° (also: tap the BOOT button).
+        case "flip":
+        {
+            using var c = VaultClient.Connect(port);
+            var r = c.Request("FLIP");
+            if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
+                return Fail(r.Terminal);
+            Console.WriteLine(r.Terminal[3..]);   // "FLIP 0" | "FLIP 1"
+            return 0;
+        }
+
         default:
             return Usage($"unknown command '{cmd}'");
     }
@@ -256,6 +267,7 @@ static int Usage(string? err = null)
           VaultCli status            [--port COMx] [--json]
           VaultCli ttl   --code NNNNNN  --hour N|0|-1 | --minutes N|0|-1
           VaultCli wipe  --code NNNNNN
+          VaultCli flip                               (or tap BOOT button)
 
         TTL is powered-time (only counts while plugged in). N>0 hours/minutes,
         0 = destroy now, -1 = no expiry. Port is auto-detected (PING handshake).

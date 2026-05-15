@@ -16,6 +16,7 @@ constexpr int8_t PIN_TFT_CS   = 14;
 constexpr int8_t PIN_TFT_DC   = 15;
 constexpr int8_t PIN_TFT_RST  = 21;
 constexpr int8_t PIN_TFT_BL   = 22;
+constexpr int8_t PIN_BOOT_BTN = 9;    // tap = flip display 180
 constexpr int    TFT_W        = 172;
 constexpr int    TFT_H        = 320;
 
@@ -38,7 +39,9 @@ constexpr unsigned long DEFAULT_TTL_MS  = 3600000UL; // 1 h powered-time
 constexpr long          TTL_MIN_S    = 60;
 constexpr long          TTL_MAX_S    = 86400;
 constexpr unsigned long RENDER_MS    = 500;
-constexpr unsigned long TTL_PERSIST_MS = 15000;      // re-persist remaining every 15 s
+constexpr unsigned long TTL_PERSIST_MS = 15000;      // backstop re-persist
+constexpr unsigned long BOOT_TAX_MS    = 60000;      // each power-up costs 60 s
+                                                     // (bounds power-cycle TTL evasion)
 constexpr unsigned long IDLE_DEAUTH_MS = 120000UL;
 constexpr unsigned long LED_FLASH_MS = 130;
 constexpr uint32_t      PBKDF2_ITERS = 20000;
@@ -96,6 +99,21 @@ static int           g_rxLen         = 0;
 static bool          g_rxOverflow    = false;
 static unsigned long g_lastRenderMs  = 0;
 static bool          g_screenInit    = false;
+static bool          g_flip          = false;       // display rotated 180
+
+// Non-secret display config lives in its own NVS namespace so a self-destruct
+// (which clears the "vault" namespace) never resets the user's orientation.
+static void loadFlip() {
+  prefs.begin("cfg", true);
+  g_flip = prefs.getBool("flip", false);
+  prefs.end();
+}
+static void saveFlip() {
+  prefs.begin("cfg", false);
+  prefs.putBool("flip", g_flip);
+  prefs.end();
+}
+static void applyRotation() { tft.setRotation(g_flip ? 2 : 0); }
 
 static uint8_t  g_plain[1 + MAX_ENTRIES * (1 + 2 + MAX_KEY_LEN + MAX_VAL_LEN)];
 static uint8_t  g_cipher[sizeof(g_plain)];
@@ -500,6 +518,7 @@ static void cmdUnseal(char* arg) {
     g_state  = ST_UNSEALED;
     g_authed = true;
     g_lastTickMs = millis();
+    persistTtl();                 // commit remaining before serving any read
     char r[48];
     snprintf(r, sizeof(r), "OK UNSEALED items=%d ttl_s=%lu",
              countEntries(), g_ttlInfinite ? 0 : ttlRemainS());
@@ -638,7 +657,33 @@ static void handleLine(char* line) {
   if (strcmp(line, "SEAL") == 0) { if (!g_authed) { sendLine("ERR 401 NOAUTH"); return; } cmdSeal(); return; }
   if (strcmp(line, "TTL")  == 0) { if (!g_authed && g_state != ST_EMPTY) { sendLine("ERR 401 NOAUTH"); return; } cmdTtl(a1); return; }
   if (strcmp(line, "WIPE") == 0) { if (!g_authed && g_state != ST_UNSEALED) { sendLine("ERR 401 NOAUTH"); return; } cmdWipe(); return; }
+  if (strcmp(line, "FLIP") == 0) {
+    g_flip = !g_flip; saveFlip(); applyRotation(); g_screenInit = false;
+    char r[20]; snprintf(r, sizeof(r), "OK FLIP %d", g_flip ? 1 : 0);
+    sendLine(r);
+    return;
+  }
   sendLine("ERR 400 BADREQ");
+}
+
+// BOOT button (GPIO9): debounced tap toggles display orientation.
+static void pollFlipButton() {
+  static int prev = HIGH;
+  static unsigned long lastChange = 0;
+  int cur = digitalRead(PIN_BOOT_BTN);
+  unsigned long now = millis();
+  if (cur != prev && now - lastChange > 40) {
+    lastChange = now;
+    if (cur == LOW) {                 // press edge
+      g_flip = !g_flip;
+      saveFlip();
+      applyRotation();
+      g_screenInit = false;
+    }
+    prev = cur;
+  } else if (cur == prev) {
+    prev = cur;
+  }
 }
 
 static void pumpSerial() {
@@ -690,8 +735,10 @@ void setup() {
 
   pinMode(PIN_TFT_BL, OUTPUT);
   digitalWrite(PIN_TFT_BL, HIGH);
+  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
+  loadFlip();
   tft.init(TFT_W, TFT_H);
-  tft.setRotation(0);
+  applyRotation();
   tft.fillScreen(COL_BG);
 
   zeroEntries();
@@ -704,6 +751,20 @@ void setup() {
       g_ttlInfinite = (h.ttlRemainingMs == 0xFFFFFFFFu);
       g_ttlRemainMs = g_ttlInfinite ? DEFAULT_TTL_MS : h.ttlRemainingMs;
       Serial.println(F("sealed payload found in flash"));
+      if (!g_ttlInfinite) {
+        // Boot tax: every power-up costs a fixed quantum, written to flash
+        // BEFORE unseal is possible. Bounds the power-cycle TTL-evasion
+        // attack (yank power < persist interval to read for free).
+        if (g_ttlRemainMs <= BOOT_TAX_MS) {
+          Serial.println(F("boot tax exhausts budget -> destroy"));
+          selfDestruct("boot tax: budget exhausted");
+        } else {
+          g_ttlRemainMs -= BOOT_TAX_MS;
+          persistTtl();
+          Serial.printf("boot tax -%lus, remaining %lus\n",
+                        BOOT_TAX_MS / 1000, g_ttlRemainMs / 1000);
+        }
+      }
     } else {
       eraseFlash();          // corrupt/foreign blob → destroy
       g_state = ST_EMPTY;
@@ -721,6 +782,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   trackConnection();
+  pollFlipButton();
   pumpSerial();
   tickTtl();
 
