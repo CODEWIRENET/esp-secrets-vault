@@ -7,13 +7,61 @@ give an AI agent **time-boxed, human-consented** access to credentials (SMTP
 settings, connection strings) without those secrets living in the agent's
 config or environment.
 
+## Why
+
+AI agents increasingly need *real* credentials — SMTP logins, database
+connection strings, API keys — to do useful work. The usual options are all
+uncomfortable:
+
+- **Env vars / `.env` files** — the secret now lives wherever the agent runs,
+  gets copied into logs, crash dumps, and context windows, and outlives the
+  task that needed it.
+- **A cloud secrets manager** — solves storage, but the agent still holds a
+  long-lived token that *is* the keys to everything, and access is invisible to
+  the human in the moment.
+- **Just paste it into the prompt** — now it's in transcripts and model
+  context forever.
+
+The missing piece is **consent that is physical, scoped, and observable**. A
+human should be able to say "yes, for the next 5 hours, you may read these
+specific values" — and *see* that it happened.
+
+`esp-secrets-vault` makes the **consent itself a physical object**. The secret
+lives only in the RAM of a small device on your desk. A 6-digit code shown on
+its screen is the capability — it can't be exfiltrated from the agent's config
+because it was never there; it changes on power-loss; it auto-expires; and the
+device's screen/LED show, in the room, when a value was read. Pulling the USB
+cable is a hard revoke anyone can perform without a console.
+
+It is deliberately **not** an HSM (see threat model). Its value is making
+time-boxed, human-in-the-loop credential access *cheap, visible, and physical*
+for the agent era.
+
+## Architecture
+
 ```
-┌─ human ─┐   set smtp ... --code 123456 --hour 5    ┌──────────────┐
-│ VaultCli│ ───────────────────────────────────────► │  ESP32-C6    │
-└─────────┘                                           │  RAM-only    │  6-digit
-┌─ AI ────┐   get smtp --code 123456                  │  TTL + lock  │  code on
-│ VaultCli│ ◄─────────────────────────────────────── │  TFT display │  screen
-└─────────┘   value (decoded)                         └──────────────┘
+                         ┌──────────────────────────────────────┐
+                         │            ESP32-C6 (USB)             │
+                         │                                       │
+   ┌──────────┐  set/ttl │   ┌───────────┐     ┌──────────────┐  │
+   │  HUMAN   │──────────┼──►│  RAM-only  │     │  TFT screen  │  │
+   │ VaultCli │  code+TTL │   │  K/V store │     │  ┌────────┐  │  │
+   └──────────┘          │   │ 16×512 B   │     │  │ 482913 │◄─┼──┼─ 6-digit code
+        ▲                │   │ no flash   │     │  └────────┘  │  │   (screen only,
+        │ reads code     │   └─────┬──────┘     │  ACTIVE 4:59 │  │    never on wire)
+        │ off screen     │         │            │  RGB: green  │  │
+        │                │   ┌─────▼──────┐     └──────────────┘  │
+   ┌──────────┐   get    │   │  AUTH gate │   wipe on: TTL=0,     │
+   │   AI     │──────────┼──►│ +lockout   │   power loss, reset,  │
+   │ VaultCli │  code    │   │ +TTL timer │   `wipe`, new TTL     │
+   └──────────┘ ◄────────┼───┴────────────┘                       │
+       value (base64 on  │                                        │
+       serial, decoded   └────────────────────────────────────────┘
+       by CLI)
+
+  Lifecycle:  power on → random 6-digit code → human pairs + pushes secrets
+              → TTL clock runs → AI reads (LED flashes, "last read" updates)
+              → expiry / unplug / wipe → RAM zeroed → fresh code
 ```
 
 ## ⚠️ Threat model — read this first
