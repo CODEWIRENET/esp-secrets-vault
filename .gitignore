@@ -1,0 +1,21 @@
+# .NET build output (VaultCli)
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Arduino / arduino-cli build output
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# Local secrets — the whole point is secrets never touch disk
+secrets.h
+*.secret
+
+# OS
+Thumbs.db
+.DS_Store
