@@ -8,6 +8,7 @@
 #include "mbedtls/gcm.h"
 #include "mbedtls/pkcs5.h"
 #include "mbedtls/md.h"
+#include "codewire_logo.h"
 
 // ---- Hardware (LAFVIN ESP32-C6FH4 + 1.47" 172x320 ST7789)
 constexpr int8_t PIN_TFT_MOSI = 6;
@@ -422,21 +423,20 @@ static unsigned long ttlRemainS() {
 }
 
 static void render() {
-  static String cTitle, cCode, cState, cInfo, cTtl, cHint;
+  static String cCode, cState, cInfo, cTtl, cHint;
 
   if (!g_screenInit) {
     tft.fillScreen(COL_BG);
-    cTitle = cCode = cState = cInfo = cTtl = cHint = "";
+    tft.drawRGBBitmap((TFT_W - 48) / 2, 6, CODEWIRE_LOGO, 48, 48);
+    tft.drawFastHLine(8, 60, TFT_W - 16, COL_DIM);
+    cCode = cState = cInfo = cTtl = cHint = "";
     g_screenInit = true;
   }
-
-  drawBand("SECRETS COURIER", 12, 16, 2, COL_DIM, cTitle);
-  tft.drawFastHLine(8, 34, TFT_W - 16, COL_DIM);
 
   // Code only visible while not yet sealed.
   bool showCode = (g_state == ST_EMPTY || g_state == ST_STAGING);
   drawBand(showCode ? String(g_code) : String("------"),
-           60, 32, 4, showCode ? COL_FG : COL_DIM, cCode);
+           70, 32, 4, showCode ? COL_FG : COL_DIM, cCode);
 
   drawBand(stateName(), 116, 16, 2, stateColor(), cState);
 
