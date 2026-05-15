@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # needed for the release job
+
+jobs:
+  firmware:
+    name: build firmware (ESP32-C6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core + libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "Adafruit ST7735 and ST7789 Library" "Adafruit GFX Library"
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=no_ota \
+            --output-dir build secrets-vault
+      - uses: actions/upload-artifact@v4
+        with:
+          name: secrets-vault-firmware
+          path: build/*.bin
+
+  cli:
+    name: build VaultCli (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build
+        run: dotnet build VaultCli/VaultCli.csproj -c Release --warnaserror
+      - name: Publish (self-contained)
+        run: >
+          dotnet publish VaultCli/VaultCli.csproj -c Release
+          -r ${{ matrix.rid }} --self-contained true
+          -p:PublishSingleFile=true -o publish/${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VaultCli-${{ matrix.rid }}
+          path: publish/${{ matrix.rid }}
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [firmware, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Package
+        run: |
+          cd dist
+          for d in VaultCli-* secrets-vault-firmware; do
+            [ -d "$d" ] && zip -r "../$d.zip" "$d"
+          done
+          cd ..
+          ls -la *.zip
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            *.zip

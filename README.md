@@ -1,125 +1,114 @@
 # esp-secrets-vault
 
-A hardware-gated **ephemeral secrets vault**. An ESP32-C6 shows a random
-6-digit pairing code on its screen; a C# CLI (`VaultCli`) uses that code to push
-key/value secrets into the device's RAM and later read them back. Intended use:
-give an AI agent **time-boxed, human-consented** access to credentials (SMTP
-settings, connection strings) without those secrets living in the agent's
-config or environment.
+An **encrypted USB secrets courier**. Stage key/value secrets on an ESP32-C6
+using a 6-digit code shown on its screen, **seal** them (AES-256-GCM, key
+derived from the code — never stored), unplug, walk to another machine, plug in,
+and **unseal** with the same code. A wrong code **destroys the payload**.
+Designed so a human can hand an AI agent — or another PC — *time-boxed,
+physically-carried* access to credentials (SMTP, connection strings) that never
+live in any config file, env var, or model context.
 
 ## Why
 
-AI agents increasingly need *real* credentials — SMTP logins, database
-connection strings, API keys — to do useful work. The usual options are all
-uncomfortable:
+AI agents and cross-machine workflows need *real* credentials, but the usual
+options all leak:
 
-- **Env vars / `.env` files** — the secret now lives wherever the agent runs,
-  gets copied into logs, crash dumps, and context windows, and outlives the
-  task that needed it.
-- **A cloud secrets manager** — solves storage, but the agent still holds a
-  long-lived token that *is* the keys to everything, and access is invisible to
-  the human in the moment.
-- **Just paste it into the prompt** — now it's in transcripts and model
-  context forever.
+- **Env vars / `.env`** — the secret lives wherever the process runs, lands in
+  logs, crash dumps, and context windows, and outlives the task.
+- **Cloud secret managers** — solve storage, but the holder keeps a long-lived
+  token that *is* the keys, and access is invisible to the human in the moment.
+- **Paste into the prompt** — now it's in transcripts and model context forever.
+- **USB stick** — survives, but a lost stick is plaintext to whoever finds it.
 
-The missing piece is **consent that is physical, scoped, and observable**. A
-human should be able to say "yes, for the next 5 hours, you may read these
-specific values" — and *see* that it happened.
-
-`esp-secrets-vault` makes the **consent itself a physical object**. The secret
-lives only in the RAM of a small device on your desk. A 6-digit code shown on
-its screen is the capability — it can't be exfiltrated from the agent's config
-because it was never there; it changes on power-loss; it auto-expires; and the
-device's screen/LED show, in the room, when a value was read. Pulling the USB
-cable is a hard revoke anyone can perform without a console.
+The missing piece is consent that is **physical, scoped, encrypted, and
+self-destructing**. `esp-secrets-vault` makes the consent a physical object:
+the secret is encrypted at rest with a key derived from a code that exists only
+on a screen and in the courier's head; pulling power is a hard revoke; the
+budget is a powered-time clock; and one wrong guess wipes it.
 
 It is deliberately **not** an HSM (see threat model). Its value is making
-time-boxed, human-in-the-loop credential access *cheap, visible, and physical*
-for the agent era.
+time-boxed, human-carried credential transfer *cheap, visible, and physical*.
 
 ## Architecture
 
 ```
-                         ┌──────────────────────────────────────┐
-                         │            ESP32-C6 (USB)             │
-                         │                                       │
-   ┌──────────┐  set/ttl │   ┌───────────┐     ┌──────────────┐  │
-   │  HUMAN   │──────────┼──►│  RAM-only  │     │  TFT screen  │  │
-   │ VaultCli │  code+TTL │   │  K/V store │     │  ┌────────┐  │  │
-   └──────────┘          │   │ 16×512 B   │     │  │ 482913 │◄─┼──┼─ 6-digit code
-        ▲                │   │ no flash   │     │  └────────┘  │  │   (screen only,
-        │ reads code     │   └─────┬──────┘     │  ACTIVE 4:59 │  │    never on wire)
-        │ off screen     │         │            │  RGB: green  │  │
-        │                │   ┌─────▼──────┐     └──────────────┘  │
-   ┌──────────┐   get    │   │  AUTH gate │   wipe on: TTL=0,     │
-   │   AI     │──────────┼──►│ +lockout   │   power loss, reset,  │
-   │ VaultCli │  code    │   │ +TTL timer │   `wipe`, new TTL     │
-   └──────────┘ ◄────────┼───┴────────────┘                       │
-       value (base64 on  │                                        │
-       serial, decoded   └────────────────────────────────────────┘
-       by CLI)
-
-  Lifecycle:  power on → random 6-digit code → human pairs + pushes secrets
-              → TTL clock runs → AI reads (LED flashes, "last read" updates)
-              → expiry / unplug / wipe → RAM zeroed → fresh code
+        PC A (source)                                  PC B (destination)
+  ┌───────────────────┐                            ┌────────────────────┐
+  │ VaultCli set ...   │  AUTH(code)+SET (RAM)      │ VaultCli unseal    │
+  │ VaultCli seal      │ ─────────────────────────► │   --code 482913    │
+  └───────────────────┘                            └─────────┬──────────┘
+            │                                                 │ correct → AES-GCM
+            ▼                                                 │ decrypt to RAM
+  ┌─────────────────────────── ESP32-C6 ───────────────────────────┐
+  │  STAGING (code on screen)   SEALED (code hidden)   UNSEALED     │
+  │  plaintext in RAM      ──►  AES-256-GCM in flash ─► plaintext   │
+  │                             key = PBKDF2(code,salt)  in RAM     │
+  │                             code NEVER stored                   │
+  │                                                                 │
+  │  self-destruct (zero RAM + erase flash + new code) on:          │
+  │    • wrong unseal code   • powered-TTL = 0   • wipe   • ttl 0    │
+  └─────────────────────────────────────────────────────────────────┘
+        unplug & carry ──────────────────►  (TTL only counts while powered)
 ```
 
 ## ⚠️ Threat model — read this first
 
-This is a **human-consented, time-boxed, physically-visible convenience
-boundary — NOT a cryptographically secure secret store.**
+A **human-carried, time-boxed, encrypted convenience boundary — NOT an HSM.**
 
-- **Plaintext over USB-serial.** The 6-digit code is the *only* gate. Any local
-  process that can open the COM port can speak the protocol. There is no
-  transport encryption and no OS ACL beyond default Windows device
-  permissions.
-- **Brute-force is mitigated, not eliminated.** 6 digits = 10⁶; wrong attempts
-  are throttled 1 s each and lock the device (60 s, doubling per 5 fails, cap
-  1 h). A determined local attacker with physical USB access is still in scope.
-- **No encryption at rest in RAM.** A JTAG/debug attacker with physical access
-  could dump SRAM. Ephemerality (RAM-only, wiped on reset/power/TTL) is the
-  only protection.
-- Use it for *convenience and consent signalling*, not to protect secrets from
-  a capable local adversary.
+- **Encrypted at rest.** The sealed blob is AES-256-GCM; the key is
+  `PBKDF2-HMAC-SHA256(code, random salt, 20k iters)`. The code is never written
+  to the device. A stolen *sealed* device is ciphertext without the code.
+- **One wrong guess destroys it.** A failed `unseal` (GCM auth failure) triggers
+  active erase: RAM zeroed, NVS blob overwritten + cleared, fresh code. There is
+  **no retry** — a typo in the code loses the payload. This is intentional;
+  budget for it.
+- **Powered-time TTL only.** The board has no RTC, so the lifetime clock counts
+  *plugged-in time*, not wall-clock. Carrying it unplugged does not consume
+  budget; sitting plugged in does. Expiry → active erase.
+- **NVS wear-levelling.** Erase overwrites then clears the blob, but flash
+  wear-levelling may leave old *ciphertext* pages physically until GC. It's
+  ciphertext without the code, but don't treat a "destroyed" device as
+  forensically clean against a determined lab.
+- **Staging window.** Before `seal`, staged items are plaintext in RAM and
+  readable on that serial session. Seal promptly; unplug if interrupted.
+- Not protected against: a JTAG/SRAM attacker with physical access to a
+  *powered, unsealed* device.
 
 ## Hardware
 
 LAFVIN ESP32-C6FH4 + 1.47" 172×320 ST7789 TFT. Pins: `MOSI=6 SCK=7 CS=14
-DC=15 RST=21 BL=22`, BOOT `GPIO9`, WS2812 on `RGB_BUILTIN`. Firmware is
-**offline** — no WiFi.
-
-## Layout
-
-- `secrets-vault/` — ESP32-C6 firmware (Arduino/C++)
-- `VaultCli/` — .NET 8 Windows CLI
+DC=15 RST=21 BL=22`, BOOT `GPIO9`, WS2812 on `RGB_BUILTIN`. **Offline** — no
+WiFi/Bluetooth used.
 
 ## Serial protocol (115200 8N1, newline-delimited, base64 values)
 
-| Request | Auth | Response |
+| Request | When | Response |
 |---|---|---|
-| `PING` | no | `OK PONG vault/1 <free>/<max>` |
-| `STATUS` | no | `OK <state> entries=… ttl_s=… locked=… …` |
-| `AUTH <code>` | — | `OK AUTHED ttl_s=…` / `ERR 401 BADCODE` / `ERR 423 LOCKED <s>` |
-| `SET <b64k> <b64v>` | yes | `OK SET` / `ERR 413` / `ERR 507 FULL` |
-| `GET <b64k>` | yes | `<b64v>` then `OK` / `ERR 404` |
-| `LIST` | yes | keys… then `OK <n>` |
-| `DEL <b64k>` | yes | `OK DEL` / `ERR 404` |
-| `WIPE` | yes | `OK WIPED` |
-| `TTL <sec>` | yes | `OK TTL <sec>` — `0` = close now, `-1` = no expiry |
+| `PING` | any | `OK PONG vault/2 <STATE> <count>` |
+| `STATUS` | any | `OK <state> items=… ttl_s=… sealed=… last_read_s=… fails=…` |
+| `AUTH <code>` | EMPTY/STAGING | `OK AUTHED ttl_s=…` / `ERR 401 BADCODE` / `ERR 409 SEALED` |
+| `SET <b64k> <b64v>` | STAGING | `OK SET` / `ERR 413` / `ERR 507 FULL` |
+| `SEAL` | STAGING | `OK SEALED` (encrypts RAM→flash, hides code) |
+| `UNSEAL <code>` | SEALED | `OK UNSEALED items=…` / `ERR 401` **(destroys payload)** |
+| `GET <b64k>` | STAGING/UNSEALED | `<b64v>` then `OK` / `ERR 404` / `ERR 409` |
+| `LIST` | STAGING/UNSEALED | keys… then `OK <n>` |
+| `TTL <sec>` | EMPTY/STAGING | `OK TTL <s>` — `0` = destroy now, `-1` = no expiry |
+| `WIPE` | not SEALED | `OK WIPED` (destroy everything) |
 
-Auth is bound to the serial session; closing the port (or 120 s idle)
-de-authenticates. Caps: 16 entries, 48-byte keys, 512-byte values, RAM only.
+States: `EMPTY → STAGING → SEALED → UNSEALED` (+ transient `DESTROYED`). Auth is
+per serial session. The device port is found by the CLI via the PING handshake
+— no driver/VID database, fully cross-platform.
 
 ## Build & flash
 
-Firmware (needs `arduino-cli` + `esp32:esp32` core, Adafruit ST7789/GFX):
+Firmware (`arduino-cli` + `esp32:esp32` core ≥ 3.3.8, Adafruit ST7789/GFX):
 
 ```
 arduino-cli compile --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=no_ota secrets-vault
-arduino-cli upload  --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=no_ota -p COM5 secrets-vault
+arduino-cli upload  --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=no_ota -p <PORT> secrets-vault
 ```
 
-CLI (.NET 8 SDK):
+CLI (.NET 8 SDK — builds/runs on Windows, Linux, macOS):
 
 ```
 dotnet build VaultCli/VaultCli.csproj -c Release
@@ -128,30 +117,80 @@ dotnet build VaultCli/VaultCli.csproj -c Release
 ## CLI usage
 
 ```
+# PC A — stage & seal (code is shown on the device screen)
+VaultCli set  smtp "host=mail;user=a;pass=b" --code 482913 --hour 5
+VaultCli set  db   "Server=...;Pwd=..."       --code 482913
+VaultCli seal                                  --code 482913
+# unplug, carry the device, remember 482913
+
+# PC B — unseal & read   (WRONG CODE DESTROYS THE PAYLOAD)
+VaultCli unseal --code 482913
+VaultCli get smtp
+VaultCli list
+
 VaultCli status [--port COMx] [--json]
-VaultCli set  <key> <value> --code NNNNNN [--hour N | --minutes N] [--port COMx]
-VaultCli get  <key>         --code NNNNNN [--port COMx] [--json]
-VaultCli list               --code NNNNNN [--port COMx] [--json]
-VaultCli del  <key>         --code NNNNNN [--port COMx]
-VaultCli wipe               --code NNNNNN [--port COMx]
-VaultCli ttl                --code NNNNNN  --hour N | --minutes N  [--port COMx]
+VaultCli ttl  --code 482913 --minutes 0     # destroy now
+VaultCli wipe --code 482913
 ```
 
-TTL: `N` > 0 = lifetime (hours/minutes); `0` = close & wipe immediately;
-`-1` = no expiry until power-off / reset / new TTL. The clock (re)starts every
-time TTL is set. Read the 6-digit code **off the device screen** — it is never
-sent over serial without a successful `AUTH`.
+Port is auto-detected (no `--port` needed). TTL is **powered-time**:
+`--hour N`/`--minutes N` = budget, `0` = destroy now, `-1` = no expiry.
 
-Exit codes: `0` ok · `1` protocol · `2` usage · `3` no port · `4` not a vault ·
-`5` bad code · `6` locked · `7` timeout.
+## Demo
 
-## Known technical debt
+```console
+$ VaultCli status
+EMPTY items=0 ttl_s=3600 sealed=0 last_read_s=-1 fails=0
 
-`VaultCli/PortDetect.cs` is a **copy** of the WMI port-detection logic from the
-separate [CheckESP32](https://github.com/CODEWIRENET/CheckESP32) tool
-(deliberate copy-per-tool). A fix there does not propagate here automatically;
-keep them in sync manually, or publish CheckESP32 as a NuGet/dotnet-tool and
-depend on it.
+$ VaultCli set smtp "host=mail.codewire.net;user=janus;pass=hunter2" --code 482913 --hour 5
+staged
+$ VaultCli seal --code 482913
+sealed — safe to unplug
+                                  ── unplug, walk to PC B, plug in ──
+$ VaultCli status
+SEALED items=0 ttl_s=17981 sealed=1 last_read_s=-1 fails=0
+
+$ VaultCli unseal --code 482913
+unsealed — use 'get'/'list'
+$ VaultCli get smtp
+host=mail.codewire.net;user=janus;pass=hunter2
+
+$ VaultCli unseal --code 999999          # (on a fresh sealed payload)
+error: WRONG CODE — payload was destroyed (self-destruct)
+```
+
+## Use it from an AI agent
+
+The agent never sees the code — a human types it once at seal time on PC A and
+once at unseal time. After `unseal`, the agent just reads:
+
+```bash
+# bash — agent fetches a connection string at task time
+CONN="$(VaultCli get db || { echo 'vault locked/empty' >&2; exit 1; })"
+psql "$CONN" -c '...'
+```
+
+```python
+# python — typed accessor for an agent tool
+import subprocess
+
+def vault_get(key: str) -> str:
+    p = subprocess.run(["VaultCli", "get", key],
+                        capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip())   # 1=locked/missing, 3=no device
+    return p.stdout
+
+smtp = vault_get("smtp")   # secret never touches the agent's config or prompt
+```
+
+Exit codes: `0` ok · `1` protocol/locked/not-found · `2` usage · `3` no port ·
+`4` not a courier · `5` bad code (payload destroyed) · `7` timeout.
+
+## Layout
+
+- `secrets-vault/` — ESP32-C6 firmware (Arduino/C++)
+- `VaultCli/` — .NET 8 cross-platform CLI
 
 ## License
 
