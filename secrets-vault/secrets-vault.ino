@@ -362,11 +362,20 @@ static void drawCentered(const String& s, int y, uint8_t size, uint16_t color) {
   tft.print(s);
 }
 
+// Flicker-free: opaque text (drawn with COL_BG behind each glyph) overwrites
+// the previous string in place. A clearing fillRect is only needed when the
+// length changes (rare) — a same-length countdown tick never blanks/redraws.
 static void drawBand(const String& s, int y, int bandH, uint8_t size,
                      uint16_t color, String& cache) {
   if (s == cache) return;
-  tft.fillRect(0, y - 2, TFT_W, bandH + 4, COL_BG);
-  drawCentered(s, y, size, color);
+  if (s.length() != cache.length())
+    tft.fillRect(0, y - 2, TFT_W, bandH + 4, COL_BG);
+  tft.setTextSize(size);
+  tft.setTextColor(color, COL_BG);
+  int16_t x1, y1; uint16_t w, h;
+  tft.getTextBounds(s.c_str(), 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor((TFT_W - (int)w) / 2, y);
+  tft.print(s);
   cache = s;
 }
 
@@ -417,13 +426,16 @@ static void render() {
   snprintf(buf, sizeof(buf), "items: %d", countEntries());
   drawBand(buf, 156, 16, 2, COL_FG, cInfo);
 
+  unsigned long s = ttlRemainS();
+  bool counting = (g_state == ST_SEALED || g_state == ST_UNSEALED);
   if (g_ttlInfinite)
     snprintf(buf, sizeof(buf), "ttl: none");
-  else {
-    unsigned long s = ttlRemainS();
+  else if (counting)
     snprintf(buf, sizeof(buf), "ttl %02lu:%02lu:%02lu",
              s / 3600, (s % 3600) / 60, s % 60);
-  }
+  else                                  // pre-seal: budget, not a live clock
+    snprintf(buf, sizeof(buf), "budget %luh%02lum @seal",
+             s / 3600, (s % 3600) / 60);
   drawBand(buf, 192, 16, 2, COL_FLAT, cTtl);
 
   const char* hint;
