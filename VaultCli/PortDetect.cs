@@ -1,68 +1,52 @@
-using System.Management;
-using System.Text.RegularExpressions;
+using System.IO.Ports;
 
 namespace VaultCli;
 
-// Port detection lifted from CheckESP32/Program.cs (copy-per-tool, repo convention).
+// Cross-platform serial-port enumeration. We do NOT try to identify the device
+// by VID/PID here — the PING handshake in VaultClient is authoritative (only a
+// secrets-courier answers "OK PONG vault/..."), so a plain port list is enough
+// and keeps this dependency-free (no WMI / no platform lock-in).
 internal static class PortDetect
 {
-    private static readonly string[] KnownVids =
+    public static List<string> FindCandidatePorts()
     {
-        "VID_10C4", // Silicon Labs (CP210x)
-        "VID_1A86", // QinHeng (CH340/CH341)
-        "VID_303A", // Espressif (native USB on ESP32-S2/S3/C3/C6/H2)
-        "VID_0403"  // FTDI (FT232 on some dev boards)
-    };
+        var ports = new List<string>(SerialPort.GetPortNames());
 
-    private static readonly string[] KnownChips = { "CP210", "CH340" };
-
-    private sealed record PnpDevice(
-        string Name, string Caption, string DeviceId, string Manufacturer);
-
-    public static List<string> FindEspPorts()
-    {
-        var ports = new List<string>();
-        foreach (var d in LoadAllPnpDevices())
+        // GetPortNames is reliable on Windows (COMx). On Linux/macOS it can miss
+        // freshly-enumerated CDC devices — add the usual device-node globs.
+        if (!OperatingSystem.IsWindows())
         {
-            var haystack = $"{d.Name} {d.Caption}";
-
-            bool isEsp = KnownChips.Any(c =>
-                haystack.Contains(c, StringComparison.OrdinalIgnoreCase));
-            if (!isEsp)
-                isEsp = KnownVids.Any(v =>
-                    d.DeviceId.Contains(v, StringComparison.OrdinalIgnoreCase));
-            if (!isEsp) continue;
-
-            var port = ExtractComPort(haystack);
-            if (port is not null && !ports.Contains(port))
-                ports.Add(port);
+            foreach (var pat in new[]
+                     {
+                         "/dev/ttyACM*", "/dev/ttyUSB*",
+                         "/dev/tty.usbmodem*", "/dev/tty.usbserial*",
+                         "/dev/cu.usbmodem*", "/dev/cu.usbserial*"
+                     })
+            {
+                var dir = Path.GetDirectoryName(pat)!;
+                var glob = Path.GetFileName(pat);
+                if (!Directory.Exists(dir)) continue;
+                foreach (var f in Directory.EnumerateFiles(dir, glob))
+                    if (!ports.Contains(f)) ports.Add(f);
+            }
         }
+
+        // Stable order; on Windows sort COM2 < COM10 numerically.
+        ports.Sort((a, b) =>
+        {
+            int na = ExtractNum(a), nb = ExtractNum(b);
+            return na != nb ? na.CompareTo(nb)
+                            : string.CompareOrdinal(a, b);
+        });
         return ports;
     }
 
-    private static List<PnpDevice> LoadAllPnpDevices()
+    private static int ExtractNum(string s)
     {
-        var list = new List<PnpDevice>();
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, Caption, DeviceID, Manufacturer FROM Win32_PnPEntity");
-
-        foreach (ManagementObject d in searcher.Get())
-        {
-            using (d)
-            {
-                list.Add(new PnpDevice(
-                    (d["Name"] as string) ?? string.Empty,
-                    (d["Caption"] as string) ?? string.Empty,
-                    (d["DeviceID"] as string) ?? string.Empty,
-                    (d["Manufacturer"] as string) ?? string.Empty));
-            }
-        }
-        return list;
-    }
-
-    private static string? ExtractComPort(string text)
-    {
-        var match = Regex.Match(text, @"\bCOM\d+\b", RegexOptions.IgnoreCase);
-        return match.Success ? match.Value.ToUpperInvariant() : null;
+        int i = 0, n = 0; bool any = false;
+        for (; i < s.Length; i++)
+            if (char.IsDigit(s[i])) { n = n * 10 + (s[i] - '0'); any = true; }
+            else if (any) break;
+        return any ? n : int.MaxValue;
     }
 }

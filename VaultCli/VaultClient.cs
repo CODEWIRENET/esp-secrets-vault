@@ -22,10 +22,10 @@ internal sealed class VaultClient : IDisposable
     {
         var candidates = explicitPort is not null
             ? new List<string> { explicitPort }
-            : PortDetect.FindEspPorts();
+            : PortDetect.FindCandidatePorts();
 
         if (candidates.Count == 0)
-            throw new VaultException(3, "no ESP32 serial port found (is it plugged in?)");
+            throw new VaultException(3, "no serial port found (is it plugged in?)");
 
         foreach (var name in candidates)
         {
@@ -69,8 +69,8 @@ internal sealed class VaultClient : IDisposable
 
         throw new VaultException(4,
             explicitPort is not null
-                ? $"{explicitPort} did not answer as a secrets-vault"
-                : "no secrets-vault responded on any ESP32 port");
+                ? $"{explicitPort} did not answer as a secrets-courier"
+                : "no secrets-courier responded on any serial port");
     }
 
     private bool TryPing(int attempts)
@@ -125,11 +125,25 @@ internal sealed class VaultClient : IDisposable
     {
         var r = Request("AUTH " + code);
         if (r.Terminal.StartsWith("OK AUTHED", StringComparison.Ordinal)) return;
-        if (r.Terminal.StartsWith("ERR 423", StringComparison.Ordinal))
-            throw new VaultException(6, "device is locked: " + r.Terminal);
+        if (r.Terminal.StartsWith("ERR 409 SEALED", StringComparison.Ordinal))
+            throw new VaultException(1,
+                "device is SEALED — use 'unseal --code' instead of 'set/seal'");
         if (r.Terminal.StartsWith("ERR 401", StringComparison.Ordinal))
             throw new VaultException(5, "bad code");
         throw new VaultException(1, "auth failed: " + r.Terminal);
+    }
+
+    // Wrong code here makes the device DESTROY the payload (self-destruct).
+    public void Unseal(string code)
+    {
+        var r = Request("UNSEAL " + code);
+        if (r.Terminal.StartsWith("OK UNSEALED", StringComparison.Ordinal)) return;
+        if (r.Terminal.StartsWith("ERR 409 NOTSEALED", StringComparison.Ordinal))
+            throw new VaultException(1, "nothing sealed on the device");
+        if (r.Terminal.StartsWith("ERR 401", StringComparison.Ordinal))
+            throw new VaultException(5,
+                "WRONG CODE — payload was destroyed (self-destruct)");
+        throw new VaultException(1, "unseal failed: " + r.Terminal);
     }
 
     public static string B64(string s) =>

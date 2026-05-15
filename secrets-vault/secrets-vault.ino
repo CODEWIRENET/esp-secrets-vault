@@ -464,11 +464,13 @@ static void selfDestruct(const char* reason) {
 }
 
 static void cmdAuth(char* arg) {
-  if (g_state == ST_SEALED) { sendLine("ERR 409 SEALED use UNSEAL"); return; }
-  if (g_state == ST_UNSEALED || g_state == ST_STAGING) { sendLine("OK AUTHED"); g_authed = true; return; }
+  if (g_state == ST_SEALED)    { sendLine("ERR 409 SEALED use UNSEAL"); return; }
+  if (g_state == ST_DESTROYED) { sendLine("ERR 409 BUSY"); return; }
+  if (g_state == ST_UNSEALED)  { sendLine("OK AUTHED"); return; } // already open at dest
+  // EMPTY or STAGING: the code is on-screen — require it every time.
   if (arg && strcmp(arg, g_code) == 0) {
     g_authed = true;
-    g_state  = ST_STAGING;
+    if (g_state == ST_EMPTY) g_state = ST_STAGING;
     char r[48];
     snprintf(r, sizeof(r), "OK AUTHED ttl_s=%lu", g_ttlInfinite ? 0 : ttlRemainS());
     sendLine(r);

@@ -1,7 +1,7 @@
 using VaultCli;
 
-// Exit codes: 0 ok · 1 protocol · 2 usage · 3 no port · 4 not vault
-//             5 bad code · 6 locked · 7 timeout
+// Exit codes: 0 ok · 1 protocol · 2 usage · 3 no port · 4 not a courier
+//             5 bad code (UNSEAL with wrong code => payload destroyed) · 7 timeout
 
 try
 {
@@ -44,6 +44,7 @@ static int Run(string[] args)
             return 0;
         }
 
+        // PC A: stage one item (repeat for more), code is on the device screen.
         case "set":
         {
             if (rest.Count < 2) return Usage("set needs <key> <value>");
@@ -51,35 +52,54 @@ static int Run(string[] args)
             if (hour is not null && minutes is not null)
                 return Usage("--hour and --minutes are mutually exclusive");
             long? ttl = TtlSeconds(hour, minutes);
-            if (ttl == 0)
-                return Usage("--hour/--minutes 0 with 'set' is contradictory; "
-                           + "use 'VaultCli ttl --hour 0' or 'wipe' to close now");
             string key = rest[0], val = rest[1];
 
             using var c = VaultClient.Connect(port);
             c.Authenticate(code);
-
             if (ttl is not null)
             {
                 var t = c.Request("TTL " + ttl);
                 if (!t.Terminal.StartsWith("OK", StringComparison.Ordinal))
                     return Fail(t.Terminal);
             }
-
             var r = c.Request($"SET {VaultClient.B64(key)} {VaultClient.B64(val)}");
             if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
                 return Fail(r.Terminal);
-            Console.WriteLine("ok");
+            Console.WriteLine("staged");
             return 0;
         }
 
+        // PC A: encrypt staged items to flash, hide the code. Unplug & carry.
+        case "seal":
+        {
+            if (code is null) return Usage("seal needs --code");
+            using var c = VaultClient.Connect(port);
+            c.Authenticate(code);
+            var r = c.Request("SEAL");
+            if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
+                return Fail(r.Terminal);
+            Console.WriteLine("sealed — safe to unplug");
+            return 0;
+        }
+
+        // PC B: decrypt. WRONG CODE DESTROYS THE PAYLOAD.
+        case "unseal":
+        {
+            if (code is null) return Usage("unseal needs --code");
+            using var c = VaultClient.Connect(port);
+            c.Unseal(code);
+            Console.WriteLine("unsealed — use 'get'/'list'");
+            return 0;
+        }
+
+        // PC B (after unseal) or PC A (while staging) — no code needed here.
         case "get":
         {
             if (rest.Count < 1) return Usage("get needs <key>");
-            if (code is null) return Usage("get needs --code");
             using var c = VaultClient.Connect(port);
-            c.Authenticate(code);
             var r = c.Request("GET " + VaultClient.B64(rest[0]));
+            if (r.Terminal.StartsWith("ERR 409", StringComparison.Ordinal))
+                return Fail("device is SEALED — run: VaultCli unseal --code <code>", 1);
             if (r.Terminal.StartsWith("ERR 404", StringComparison.Ordinal))
                 return Fail("not found", 1);
             if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
@@ -87,8 +107,7 @@ static int Run(string[] args)
             string value = r.DataLines.Count > 0
                 ? VaultClient.UnB64(r.DataLines[0]) : "";
             if (json)
-                Console.WriteLine(
-                    $"{{\"key\":{JStr(rest[0])},\"value\":{JStr(value)}}}");
+                Console.WriteLine($"{{\"key\":{JStr(rest[0])},\"value\":{JStr(value)}}}");
             else
                 Console.Out.Write(value);
             return 0;
@@ -96,36 +115,21 @@ static int Run(string[] args)
 
         case "list":
         {
-            if (code is null) return Usage("list needs --code");
             using var c = VaultClient.Connect(port);
-            c.Authenticate(code);
             var r = c.Request("LIST");
+            if (r.Terminal.StartsWith("ERR 409", StringComparison.Ordinal))
+                return Fail("device is SEALED — run: VaultCli unseal --code <code>", 1);
             if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
                 return Fail(r.Terminal);
             var keys = r.DataLines.Select(VaultClient.UnB64).ToList();
             if (json)
-                Console.WriteLine("[" +
-                    string.Join(",", keys.Select(JStr)) + "]");
+                Console.WriteLine("[" + string.Join(",", keys.Select(JStr)) + "]");
             else
                 foreach (var k in keys) Console.WriteLine(k);
             return 0;
         }
 
-        case "del":
-        {
-            if (rest.Count < 1) return Usage("del needs <key>");
-            if (code is null) return Usage("del needs --code");
-            using var c = VaultClient.Connect(port);
-            c.Authenticate(code);
-            var r = c.Request("DEL " + VaultClient.B64(rest[0]));
-            if (r.Terminal.StartsWith("ERR 404", StringComparison.Ordinal))
-                return Fail("not found", 1);
-            if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
-                return Fail(r.Terminal);
-            Console.WriteLine("ok");
-            return 0;
-        }
-
+        // Destroy everything (flash + RAM). Only valid before sealing.
         case "wipe":
         {
             if (code is null) return Usage("wipe needs --code");
@@ -134,23 +138,24 @@ static int Run(string[] args)
             var r = c.Request("WIPE");
             if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
                 return Fail(r.Terminal);
-            Console.WriteLine("ok");
+            Console.WriteLine("wiped");
             return 0;
         }
 
+        // Set the powered-time budget before sealing. 0 = destroy now, -1 = none.
         case "ttl":
         {
             if (code is null) return Usage("ttl needs --code");
             long? secs = TtlSeconds(hour, minutes);
             if (secs is null)
                 return Usage("ttl needs --hour N|0|-1 or --minutes N|0|-1 "
-                           + "(0 = close now, -1 = no expiry until power)");
+                           + "(0 = destroy now, -1 = no expiry)");
             using var c = VaultClient.Connect(port);
             c.Authenticate(code);
             var r = c.Request("TTL " + secs);
             if (!r.Terminal.StartsWith("OK", StringComparison.Ordinal))
                 return Fail(r.Terminal);
-            Console.WriteLine(secs == 0 ? "closed" : "ok " + r.Terminal[3..]);
+            Console.WriteLine(secs == 0 ? "destroyed" : "ok " + r.Terminal[3..]);
             return 0;
         }
 
@@ -159,8 +164,8 @@ static int Run(string[] args)
     }
 }
 
-// null = neither flag given. -1 = infinite (any negative). 0 = close now.
-// else positive seconds. --hour/--minutes are mutually exclusive (checked upstream).
+// null = neither flag. -1 = no expiry (any negative). 0 = destroy now.
+// else positive seconds. --hour/--minutes mutually exclusive (checked upstream).
 static long? TtlSeconds(string? hour, string? minutes)
 {
     if (hour is not null)
@@ -224,7 +229,7 @@ static string ToJson(string statusBody)
     {
         int eq = tok.IndexOf('=');
         if (!first) sb.Append(',');
-        if (eq < 0) { sb.Append($"\"state\":{JStr(tok)}"); }
+        if (eq < 0) sb.Append($"\"state\":{JStr(tok)}");
         else sb.Append($"{JStr(tok[..eq])}:{JStr(tok[(eq + 1)..])}");
         first = false;
     }
@@ -236,19 +241,27 @@ static int Usage(string? err = null)
     if (err is not null) Console.Error.WriteLine("usage error: " + err);
     Console.Error.WriteLine(
         """
-        VaultCli — talk to the secrets-vault ESP32
+        VaultCli — secrets-courier (encrypted USB courier)
 
-          VaultCli status [--port COMx] [--json]
-          VaultCli set  <key> <value> --code NNNNNN [--hour N | --minutes N] [--port COMx]
-          VaultCli get  <key>         --code NNNNNN [--port COMx] [--json]
-          VaultCli list               --code NNNNNN [--port COMx] [--json]
-          VaultCli del  <key>         --code NNNNNN [--port COMx]
-          VaultCli wipe               --code NNNNNN [--port COMx]
-          VaultCli ttl                --code NNNNNN  --hour N | --minutes N  [--port COMx]
+          # PC A — stage & seal
+          VaultCli set  <key> <value> --code NNNNNN [--hour N | --minutes N]
+          VaultCli seal               --code NNNNNN
+          # unplug, carry the device, remember the code
 
-        TTL: N>0 = lifetime; 0 = close & wipe now; -1 = no expiry until power/new ttl
+          # PC B — unseal & read
+          VaultCli unseal             --code NNNNNN     (WRONG CODE = DESTROYS payload)
+          VaultCli get  <key>
+          VaultCli list
 
-        exit: 0 ok  1 protocol  2 usage  3 no port  4 not vault  5 bad code  6 locked  7 timeout
+          VaultCli status            [--port COMx] [--json]
+          VaultCli ttl   --code NNNNNN  --hour N|0|-1 | --minutes N|0|-1
+          VaultCli wipe  --code NNNNNN
+
+        TTL is powered-time (only counts while plugged in). N>0 hours/minutes,
+        0 = destroy now, -1 = no expiry. Port is auto-detected (PING handshake).
+
+        exit: 0 ok  1 protocol  2 usage  3 no port  4 not a courier
+              5 bad code (payload destroyed on wrong unseal)  7 timeout
         """);
     return 2;
 }
