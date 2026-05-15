@@ -427,8 +427,9 @@ static void render() {
 
   if (!g_screenInit) {
     tft.fillScreen(COL_BG);
-    tft.drawRGBBitmap((TFT_W - 48) / 2, 6, CODEWIRE_LOGO, 48, 48);
-    tft.drawFastHLine(8, 60, TFT_W - 16, COL_DIM);
+    tft.drawRGBBitmap((TFT_W - CODEWIRE_LOGO_W) / 2, 4,
+                      CODEWIRE_LOGO, CODEWIRE_LOGO_W, CODEWIRE_LOGO_H);
+    tft.drawFastHLine(8, 98, TFT_W - 16, COL_DIM);
     cCode = cState = cInfo = cTtl = cHint = "";
     g_screenInit = true;
   }
@@ -436,13 +437,13 @@ static void render() {
   // Code only visible while not yet sealed.
   bool showCode = (g_state == ST_EMPTY || g_state == ST_STAGING);
   drawBand(showCode ? String(g_code) : String("------"),
-           70, 32, 4, showCode ? COL_FG : COL_DIM, cCode);
+           106, 32, 4, showCode ? COL_FG : COL_DIM, cCode);
 
-  drawBand(stateName(), 116, 16, 2, stateColor(), cState);
+  drawBand(stateName(), 150, 16, 2, stateColor(), cState);
 
   char buf[40];
   snprintf(buf, sizeof(buf), "items: %d", countEntries());
-  drawBand(buf, 156, 16, 2, COL_FG, cInfo);
+  drawBand(buf, 180, 16, 2, COL_FG, cInfo);
 
   unsigned long s = ttlRemainS();
   bool counting = (g_state == ST_SEALED || g_state == ST_UNSEALED);
@@ -454,7 +455,7 @@ static void render() {
   else                                  // pre-seal: budget, not a live clock
     snprintf(buf, sizeof(buf), "budget %luh%02lum @seal",
              s / 3600, (s % 3600) / 60);
-  drawBand(buf, 192, 16, 2, COL_FLAT, cTtl);
+  drawBand(buf, 208, 16, 2, COL_FLAT, cTtl);
 
   const char* hint;
   switch (g_state) {
@@ -464,11 +465,11 @@ static void render() {
     case ST_UNSEALED:  hint = "reading enabled";       break;
     default:           hint = "payload destroyed";     break;
   }
-  drawBand(hint, 240, 8, 1, COL_DIM, cHint);
+  drawBand(hint, 248, 8, 1, COL_DIM, cHint);
 
   snprintf(buf, sizeof(buf), "fails: %d  powered-time", g_failCount);
   static String cFoot;
-  drawBand(buf, 268, 8, 1, g_failCount ? COL_DOWN : COL_DIM, cFoot);
+  drawBand(buf, 276, 8, 1, g_failCount ? COL_DOWN : COL_DIM, cFoot);
 }
 
 // ---- commands ------------------------------------------------------------
